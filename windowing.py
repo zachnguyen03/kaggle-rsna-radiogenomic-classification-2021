@@ -1,5 +1,6 @@
 import os
 import random
+from albumentations.augmentations import transforms
 import pydicom
 import numpy as np
 import torch
@@ -18,7 +19,28 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
 
+from albumentations.pytorch import ToTensor
+from albumentations import Compose, ShiftScaleRotate, Resize
+
+from albumentations import (Cutout, Compose, Normalize, RandomRotate90, HorizontalFlip,
+                           VerticalFlip, ShiftScaleRotate, Transpose, OneOf, IAAAdditiveGaussianNoise,
+                           GaussNoise, RandomGamma, RandomContrast, RandomBrightness, HueSaturationValue,
+                           RandomBrightnessContrast, Lambda, NoOp, CenterCrop, Resize
+                           )
+
 train_df = pd.read_csv('./train_labels.csv')
+
+mean_img = [0.22363983, 0.18190407, 0.2523437 ]
+std_img = [0.32451536, 0.2956294,  0.31335256]
+
+transform_train = Compose([
+    HorizontalFlip(p=0.5),
+    ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, 
+                         rotate_limit=20, p=0.3, border_mode = cv2.BORDER_REPLICATE),
+    Transpose(p=0.5),
+    # Normalize(mean=mean_img, std=std_img, max_pixel_value=255.0, p=1.0),
+    ToTensor()
+])
 
 mri_types = ("FLAIR", "T1w", "T1wCE", "T2w")
 # Helper functions to load and process DICOM images
@@ -40,37 +62,17 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
 
 set_seed(42)
-    
 
-# def load_dicom_images_3d(
-#         data_directory, scan_id, num_imgs, img_size,
-#         mri_type="FLAIR", split="train"):
-
-#     files = sorted(
-#         glob.glob(f"{data_directory}/{split}/{scan_id}/{mri_type}/*.dcm"),
-#         key=lambda x: int(x.split('-')[-1].split('.')[0]))
-
-#     middle = len(files)//2
-#     num_imgs2 = num_imgs//2
-#     p1 = max(0, middle - num_imgs2)
-#     p2 = min(len(files), middle + num_imgs2)
-#     img3d = np.stack([load_dicom_image(f, img_size) for f in files[p1:p2]]).T
-#     if img3d.shape[-1] < num_imgs:
-#         n_zero = np.zeros((img_size, img_size, num_imgs - img3d.shape[-1]))
-#         img3d = np.concatenate((img3d,  n_zero), axis = -1)
-
-#     return np.expand_dims(img3d,0)
-
-def get_dicom_metadata(dicomfile):
-    return {
-#         'PatientID': dicomfile.PatientID,
-#         'StudyInstanceID': dicomfile.StudyInstanceID,
-#         'SeriesInstanceID': dicomfile.SeriesInstanceID,
-        'WindowCenter': dicomfile.WindowCenter,
-        'WindowWidth': dicomfile.WindowWidth,
-        'RescaleIntercept': dicomfile.RescaleIntercept,
-        'RescaleSlope': dicomfile.RescaleSlope,
-    }
+# def get_dicom_metadata(dicomfile):
+#     return {
+# #         'PatientID': dicomfile.PatientID,
+# #         'StudyInstanceID': dicomfile.StudyInstanceID,
+# #         'SeriesInstanceID': dicomfile.SeriesInstanceID,
+#         'WindowCenter': dicomfile.WindowCenter,
+#         'WindowWidth': dicomfile.WindowWidth,
+#         'RescaleIntercept': dicomfile.RescaleIntercept,
+#         'RescaleSlope': dicomfile.RescaleSlope,
+#     }
 
 def prepare_image(imgpath):
     """
@@ -78,47 +80,19 @@ def prepare_image(imgpath):
     """
     pass
 
-def load_dicom(path, img_size):
+def load_dicom(path, img_size, rotate=0):
     dicom = pydicom.read_file(path)
     data = dicom.pixel_array
     data = data - np.min(data)
     if np.max(data) != 0:
         data = data / np.max(data)
     data = (data * 255).astype(np.uint8)
+    
+    if rotate > 0:
+        rot_choices = [0, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180]
+        data = cv2.rotate(data, rot_choices[rotate])
     data = cv2.resize(data, (img_size, img_size))
     return data
-
-def visualize_sample(
-    brats21id, 
-    slice_i,
-    mgmt_value,
-    types=("FLAIR", "T1w", "T1wCE", "T2w"),
-    isNotebook=False
-):
-    plt.figure(figsize=(16, 5))
-    if isNotebook == True:
-        patient_path = os.path.join(
-            "../input/rsna-miccai-brain-tumor-radiogenomic-classification/train/", 
-            str(brats21id).zfill(5),
-        )
-    else:
-        patient_path = os.path.join(
-            "./train/",
-            str(brats21id).zfill(5),
-        )
-    for i, t in enumerate(types, 1):
-        t_paths = sorted(
-            glob.glob(os.path.join(patient_path, t, "*")), 
-            key=lambda x: int(x[:-4].split("-")[-1]),
-        )
-        data = load_dicom(t_paths[int(len(t_paths) * slice_i)], 224)
-        plt.subplot(1, 4, i)
-        plt.imshow(apply_window_policy(data), cmap="gray")
-        plt.title(f"{t}{len(t_paths)*slice_i}", fontsize=16)
-        plt.axis("off")
-
-    plt.suptitle(f"MGMT_value: {mgmt_value}", fontsize=16)
-    plt.show()
     
 # Windowing algorithm
 def apply_window(image, center, width):
@@ -149,42 +123,17 @@ def apply_window_policy(image):
 #     _mgmt_value = train_df.iloc[i]["MGMT_value"]
 #     visualize_sample(brats21id=_brats21id, mgmt_value=_mgmt_value, slice_i=0.5)
     
-# transform will be the Albumentation transform object
-# class RSNADataset(torch_data.Dataset):
-#     def __init__(self, paths, targets, input_size, transform=None, split="train"):
-#         self.paths = paths
-#         self.targets = targets
-#         self.transform = transform
-#         self.input_size = input_size
-#         self.mri_types = ('FLAIR', 'T1w', 'T1wCE', 'T2w')
-#         self.channels = []
-#         self.split = split
-        
-#     def __len__(self):
-#         return len(self.paths)  
-        
-#     def __getitem__(self, index):
-#         for i, type in enumerate(self.mri_types, 1):
-#             patient_path = os.path.join('./',self.split, str(index).zfill(5))
-#             # dicomfile = load_dicom(patient_path)
-#             t_paths = sorted(
-#                 glob.glob(os.path.join(patient_path, type, "*")),
-#                 key=lambda x: int(x[:-4].split("-")[-1])
-#             )
-#             for i in range(t_paths):
-#                 data = load_dicom(t_paths[i], 224)
-#                 data = apply_window_policy(data)
-#                 self.channels.append(data)
-#         return np.mean(self.channels, axis=0)
-    
 class RSNADataset(torch_data.Dataset):
-    def __init__(self, paths, targets, input_size, label_smoothing=0.1, split='train'):
+    def __init__(self, paths, targets, input_size, transform=False, label_smoothing=0.1, split='train'):
         self.paths = paths
         self.targets = targets
         self.input_size = input_size
         self.label_smoothing=label_smoothing
+        self.rotation = np.random.randint(0,4)
         self.split = split
         self.mri_types = ('FLAIR', 'T1wCE', 'T2w')
+        self.transform = transform
+        self.transformer = transform_train
         
     def __len__(self):
         return len(self.paths)
@@ -198,21 +147,30 @@ class RSNADataset(torch_data.Dataset):
                 glob.glob(os.path.join(patient_path, type, "*")),
                 key=lambda x: int(x[:-4].split("-")[-1])
             )
-            for i in range(len(t_paths)):
-                dcmimg = load_dicom(t_paths[i], self.input_size)
+            numfiles2 = len(t_paths) // 2
+            start = max(0, numfiles2 - 32)
+            stop = min(numfiles2*2, numfiles2 + 32)
+            for i in range(start, stop):
+                dcmimg = load_dicom(t_paths[i], self.input_size, self.rotation)
                 img = apply_window_policy(dcmimg)
             
                 channels.append(img)
         channels = np.mean(channels, axis=0).transpose(2,0,1)
-        y = torch.tensor(self.targets[index], dtype=torch.float)
-        return {"X": torch.tensor(channels).float(), "y": y}
-
+        # print(channels.shape)
+        if self.transform:
+            augmented = self.transformer(image=channels)
+            channels = augmented['image']
+            channels = torch.reshape(channels, (3, 300, 300))
+        y = torch.tensor(abs(self.targets[index]-self.label_smoothing), dtype=torch.float)
+        # return {"X": torch.tensor(channels).float(), "y": y}
+        return {"X": channels.float(), "y": y}
     
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = EfficientNet.from_pretrained('efficientnet-b0')
         n_features = self.net._fc.in_features
+        self.net._dropout = nn.Dropout(p=0.3, inplace=False)
         self.net._fc = nn.Linear(in_features=n_features, out_features=1, bias=True)
         
     def forward(self, x):
@@ -346,14 +304,16 @@ def train_model(df_train, df_valid, y_train, y_valid):
     train_data_retriever = RSNADataset(
         df_train.values, 
         y_train.values,
-        input_size=224,
-        split="train/" 
+        input_size=300,
+        transform=True,
+        split="train/"
     )
 
     valid_data_retriever = RSNADataset(
         df_valid.values, 
         y_valid.values,
-        input_size=224,
+        input_size=300,
+        transform=True,
         split="train/"
     )
 
@@ -361,14 +321,16 @@ def train_model(df_train, df_valid, y_train, y_valid):
         train_data_retriever,
         batch_size=12,
         shuffle=True,
-        num_workers=8,
+        num_workers=0,
+        # pin_memory=True
     )
 
     valid_loader = torch_data.DataLoader(
         valid_data_retriever, 
         batch_size=12,
         shuffle=False,
-        num_workers=8,
+        num_workers=0,
+        # pin_memory=True
     )
 
     model = Model()
@@ -379,7 +341,7 @@ def train_model(df_train, df_valid, y_train, y_valid):
 
     # print(model)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.00002)
     #optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
 
     criterion = torch_functional.binary_cross_entropy_with_logits
@@ -392,25 +354,27 @@ def train_model(df_train, df_valid, y_train, y_valid):
     )
 
     history = trainer.fit(
-        10, 
+        300, 
         train_loader, 
         valid_loader, 
-        "./", 
-        10,
+        "./1108", 
+        100,
     )
     
     return trainer.lastmodel
 
 modelfiles = None
 
-X_train, X_val, y_train, y_val = train_test_split(train_df['BraTS21ID'], train_df['MGMT_value'], test_size=0.3)
+X_train, X_val, y_train, y_val = train_test_split(train_df['BraTS21ID'], train_df['MGMT_value'], test_size=0.3, random_state=42, stratify=train_df['MGMT_value'])
 
 # dataset = RSNADataset(paths=X_train.values,
 #                   targets=y_train.values,
 #                   input_size=224,
 #                   split="train/")
-# print(dataset[1]['X'].shape)
+# # print(dataset[1]['X'].shape)
 
 if not modelfiles:
     modelfiles = train_model(X_train, X_val, y_train, y_val)
     print(modelfiles)
+    
+    
