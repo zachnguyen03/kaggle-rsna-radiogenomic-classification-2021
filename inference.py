@@ -103,7 +103,7 @@ def inference(mri_types, input_size, modelfile):
 submission = pd.read_csv("./sample_submission.csv")
 
 submission["MGMT_value"] = 0
-mdf = './e4-loss0.682-auc0.594.pth'
+mdf = './1108-e3-loss0.693-auc0.645.pth'
 
 # pred = predict(mdf, submission, split="test/")
 # submission["MGMT_value"] += pred["MGMT_value"]

@@ -19,7 +19,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
 
-from albumentations.pytorch import ToTensor
+from albumentations.pytorch import ToTensorV2
 from albumentations import Compose, ShiftScaleRotate, Resize
 
 from albumentations import (Cutout, Compose, Normalize, RandomRotate90, HorizontalFlip,
@@ -28,7 +28,16 @@ from albumentations import (Cutout, Compose, Normalize, RandomRotate90, Horizont
                            RandomBrightnessContrast, Lambda, NoOp, CenterCrop, Resize
                            )
 
+exclude_id = ['109', '123', '709']
 train_df = pd.read_csv('./train_labels.csv')
+# train_df = train_df.drop(train_df['BraTS21ID'] in )
+
+a109 = train_df[train_df['BraTS21ID'] == 109]
+a123 = train_df[train_df['BraTS21ID'] == 123]
+a709 = train_df[train_df['BraTS21ID'] == 709]
+train_df = train_df.drop(a109.index)
+train_df = train_df.drop(a123.index)
+train_df = train_df.drop(a709.index)
 
 mean_img = [0.22363983, 0.18190407, 0.2523437 ]
 std_img = [0.32451536, 0.2956294,  0.31335256]
@@ -38,8 +47,8 @@ transform_train = Compose([
     ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, 
                          rotate_limit=20, p=0.3, border_mode = cv2.BORDER_REPLICATE),
     Transpose(p=0.5),
-    # Normalize(mean=mean_img, std=std_img, max_pixel_value=255.0, p=1.0),
-    ToTensor()
+    Normalize(max_pixel_value=255.0, p=1.0),
+    ToTensorV2()
 ])
 
 mri_types = ("FLAIR", "T1w", "T1wCE", "T2w")
@@ -118,6 +127,26 @@ def apply_window_policy(image):
     ]).transpose(1,2,0)
     return final_image
 
+def autocrop(image, threshold=0):
+    """Crops any edges below or equal to threshold
+    Crops blank image to 1x1.
+    Returns cropped image.
+    https://stackoverflow.com/questions/13538748/crop-black-edges-with-opencv
+    """
+
+    if len(image.shape) == 3:
+        flatImage = np.max(image, 2)
+    else:
+        flatImage = image
+    rows = np.where(np.max(flatImage, 0) > threshold)[0]
+    cols = np.where(np.max(flatImage, 1) > threshold)[0]
+    image = image[cols[0]: cols[-1] + 1, rows[0]: rows[-1] + 1]
+    #logger.info(image.shape)
+    sqside = max(image.shape)
+    imageout = np.zeros((sqside, sqside, 3), dtype = 'uint8')
+    imageout[:image.shape[0], :image.shape[1],:] = image.copy()
+    return imageout
+
 # for i in random.sample(range(train_df.shape[0]), 10):
 #     _brats21id = train_df.iloc[i]["BraTS21ID"]
 #     _mgmt_value = train_df.iloc[i]["MGMT_value"]
@@ -131,7 +160,7 @@ class RSNADataset(torch_data.Dataset):
         self.label_smoothing=label_smoothing
         self.rotation = np.random.randint(0,4)
         self.split = split
-        self.mri_types = ('FLAIR', 'T1wCE', 'T2w')
+        self.mri_types = ('FLAIR', "T1w", 'T1wCE', 'T2w')
         self.transform = transform
         self.transformer = transform_train
         
@@ -144,24 +173,28 @@ class RSNADataset(torch_data.Dataset):
         channels= []
         for i, type in enumerate(self.mri_types, 1):
             t_paths = sorted(
-                glob.glob(os.path.join(patient_path, type, "*")),
+                glob.glob(os.path.join(patient_path, "T1wCE", "*")),
                 key=lambda x: int(x[:-4].split("-")[-1])
             )
             numfiles2 = len(t_paths) // 2
-            start = max(0, numfiles2 - 32)
-            stop = min(numfiles2*2, numfiles2 + 32)
+            start = max(0, numfiles2-32)
+            stop = min(numfiles2*2, numfiles2+32)
             for i in range(start, stop):
                 dcmimg = load_dicom(t_paths[i], self.input_size, self.rotation)
                 img = apply_window_policy(dcmimg)
-            
                 channels.append(img)
-        channels = np.mean(channels, axis=0).transpose(2,0,1)
+        # channels = np.mean(channels, axis=0).transpose(2,0,1)
+        channels = np.mean(channels, axis=0)
+        # channels = autocrop(channels, threshold=0)
+        channels = cv2.resize(channels, (self.input_size, self.input_size))
+        # plt.imshow(channels, cmap="gray")
+        # plt.show()
         # print(channels.shape)
         if self.transform:
             augmented = self.transformer(image=channels)
             channels = augmented['image']
-            channels = torch.reshape(channels, (3, 300, 300))
-        y = torch.tensor(abs(self.targets[index]-self.label_smoothing), dtype=torch.float)
+            channels = torch.reshape(channels, (3, self.input_size, self.input_size))
+        y = torch.tensor(self.targets[index], dtype=torch.float)
         # return {"X": torch.tensor(channels).float(), "y": y}
         return {"X": channels.float(), "y": y}
     
@@ -170,7 +203,7 @@ class Model(nn.Module):
         super().__init__()
         self.net = EfficientNet.from_pretrained('efficientnet-b0')
         n_features = self.net._fc.in_features
-        self.net._dropout = nn.Dropout(p=0.3, inplace=False)
+        self.net._dropout = nn.Dropout(p=0.2, inplace=False)
         self.net._fc = nn.Linear(in_features=n_features, out_features=1, bias=True)
         
     def forward(self, x):
@@ -304,7 +337,7 @@ def train_model(df_train, df_valid, y_train, y_valid):
     train_data_retriever = RSNADataset(
         df_train.values, 
         y_train.values,
-        input_size=300,
+        input_size=224,
         transform=True,
         split="train/"
     )
@@ -312,25 +345,25 @@ def train_model(df_train, df_valid, y_train, y_valid):
     valid_data_retriever = RSNADataset(
         df_valid.values, 
         y_valid.values,
-        input_size=300,
+        input_size=224,
         transform=True,
         split="train/"
     )
 
     train_loader = torch_data.DataLoader(
         train_data_retriever,
-        batch_size=12,
+        batch_size=8,
         shuffle=True,
-        num_workers=0,
-        # pin_memory=True
+        num_workers=4,
+        pin_memory=True
     )
 
     valid_loader = torch_data.DataLoader(
         valid_data_retriever, 
-        batch_size=12,
+        batch_size=8,
         shuffle=False,
-        num_workers=0,
-        # pin_memory=True
+        num_workers=4,
+        pin_memory=True
     )
 
     model = Model()
@@ -354,11 +387,11 @@ def train_model(df_train, df_valid, y_train, y_valid):
     )
 
     history = trainer.fit(
-        300, 
+        5, 
         train_loader, 
         valid_loader, 
-        "./1108", 
-        100,
+        "./weights/1308-2D-1", 
+        5,
     )
     
     return trainer.lastmodel
@@ -370,8 +403,9 @@ X_train, X_val, y_train, y_val = train_test_split(train_df['BraTS21ID'], train_d
 # dataset = RSNADataset(paths=X_train.values,
 #                   targets=y_train.values,
 #                   input_size=224,
+#                   transform=True,
 #                   split="train/")
-# # print(dataset[1]['X'].shape)
+# print(dataset[1]['X'].shape)
 
 if not modelfiles:
     modelfiles = train_model(X_train, X_val, y_train, y_val)
